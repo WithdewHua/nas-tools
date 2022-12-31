@@ -38,6 +38,7 @@ from app.sites.sitecookie import SiteCookie
 from app.subscribe import Subscribe
 from app.subtitle import Subtitle
 from app.sync import Sync, stop_monitor
+from app.systemconfig import SystemConfig
 from app.torrentremover import TorrentRemover
 from app.utils import StringUtils, EpisodeFormat, RequestUtils, PathUtils, SystemUtils, ExceptionUtils
 from app.utils.types import RMT_MODES, RmtMode, OsType, SearchType, DownloaderType, SyncType, MediaType, SystemDictType
@@ -56,6 +57,7 @@ class WebAction:
             "search": self.__search,
             "download": self.__download,
             "download_link": self.__download_link,
+            "download_torrent": self.__download_torrent,
             "pt_start": self.__pt_start,
             "pt_stop": self.__pt_stop,
             "pt_remove": self.__pt_remove,
@@ -192,7 +194,8 @@ class WebAction:
             "auto_remove_torrents": self.__auto_remove_torrents,
             "get_douban_history": self.get_douban_history,
             "delete_douban_history": self.__delete_douban_history,
-            "list_brushtask_torrents": self.__list_brushtask_torrents
+            "list_brushtask_torrents": self.__list_brushtask_torrents,
+            "set_system_config": self.__set_system_config
         }
 
     def action(self, cmd, data=None):
@@ -469,6 +472,9 @@ class WebAction:
 
     @staticmethod
     def __download_link(data):
+        """
+        从WEB添加下载链接
+        """
         site = data.get("site")
         enclosure = data.get("enclosure")
         title = data.get("title")
@@ -501,6 +507,34 @@ class WebAction:
             return {"code": 0, "msg": "下载成功"}
         else:
             return {"code": 1, "msg": ret_msg or "如连接正常，请检查下载任务是否存在"}
+
+    @staticmethod
+    def __download_torrent(data):
+        """
+        从种子文件添加下载
+        """
+        dl_dir = data.get("dl_dir")
+        dl_setting = data.get("dl_setting")
+        files = data.get("files")
+        if not files:
+            return {"code": -1, "msg": "没有种子文件"}
+        for file_item in files:
+            file_name = file_item.get("upload", {}).get("filename")
+            file_path = os.path.join(Config().get_temp_path(), file_name)
+            media = Media().get_media_info(title=file_name)
+            media.site = "WEB"
+            # 添加下载
+            ret, ret_msg = Downloader().download(media_info=media,
+                                                 download_dir=dl_dir,
+                                                 download_setting=dl_setting,
+                                                 torrent_file=file_path)
+            # 发送消息
+            media.user_name = current_user.username
+            if ret:
+                Message().send_download_message(SearchType.WEB, media)
+            else:
+                Message().send_download_fail_message(media, ret_msg)
+        return {"code": 0, "msg": "添加下载完成！"}
 
     @staticmethod
     def __pt_start(data):
@@ -2396,7 +2430,8 @@ class WebAction:
         filename = data.get("file_name")
         if filename:
             config_path = Config().get_config_path()
-            file_path = os.path.join(config_path, filename)
+            temp_path = Config().get_temp_path()
+            file_path = os.path.join(temp_path, filename)
             try:
                 shutil.unpack_archive(file_path, config_path, format='zip')
                 return {"code": 0, "msg": ""}
@@ -4133,3 +4168,20 @@ class WebAction:
         results = self.dbhelper.get_brushtask_torrents(brush_id=data.get("id"),
                                                        active=False)
         return {"code": 0, "data": [item.as_dict() for item in results]}
+
+    @staticmethod
+    def __set_system_config(data):
+        """
+        设置系统设置（数据库）
+        """
+        key = data.get("key")
+        value = data.get("value")
+        if not key or not value:
+            return {"code": 1}
+        try:
+            SystemConfig().set_system_config(key=key, value=value)
+            SystemConfig().init_config()
+            return {"code": 0}
+        except Exception as e:
+            ExceptionUtils.exception_traceback(e)
+            return {"code": 1}

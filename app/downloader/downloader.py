@@ -11,6 +11,7 @@ from app.mediaserver import MediaServer
 from app.message import Message
 from app.sites import Sites
 from app.subtitle import Subtitle
+from app.systemconfig import SystemConfig
 from app.utils import Torrent, StringUtils, SystemUtils, ExceptionUtils
 from app.utils.commons import singleton
 from app.utils.types import MediaType, DownloaderType, SearchType, RmtMode, RMT_MODES
@@ -29,7 +30,6 @@ class Downloader:
     _pt_rmt_mode = None
     _downloaddir = []
     _download_setting = {}
-    _default_download_setting = None
 
     message = None
     mediaserver = None
@@ -37,6 +37,7 @@ class Downloader:
     media = None
     sites = None
     dbhelper = None
+    systemconfig = None
 
     def __init__(self):
         self.init_config()
@@ -48,6 +49,7 @@ class Downloader:
         self.filetransfer = FileTransfer()
         self.media = Media()
         self.sites = Sites()
+        self.systemconfig = SystemConfig()
         # 下载器配置
         pt = Config().get_config('pt')
         if pt:
@@ -63,7 +65,6 @@ class Downloader:
             self._pt_monitor_only = pt.get("pt_monitor_only")
             self._download_order = pt.get("download_order")
             self._pt_rmt_mode = RMT_MODES.get(pt.get("rmt_mode", "copy"), RmtMode.COPY)
-            self._default_download_setting = pt.get("default_download_setting") or "-1"
         # 下载目录配置
         self._downloaddir = Config().get_config('downloaddir') or []
         # 下载设置
@@ -95,8 +96,6 @@ class Downloader:
                 "ratio_limit": download_setting.RATIO_LIMIT / 100,
                 "seeding_time_limit": download_setting.SEEDING_TIME_LIMIT,
                 "downloader": download_setting.DOWNLOADER}
-        if not self._download_setting.get(self._default_download_setting):
-            self._default_download_setting = "-1"
 
     @property
     def default_client(self):
@@ -134,74 +133,71 @@ class Downloader:
         :param torrent_file: 种子文件路径
         :return: 种子或状态，错误信息
         """
-        # 下载链接
-        url = media_info.enclosure
-        if not url:
-            return None, "Url链接为空"
         # 标题
         title = media_info.org_string
-        # 详情面羰
+        # 详情页面
         page_url = media_info.page_url
         # 默认值
         _xpath, _hash, site_info, dl_files_folder, dl_files, retmsg = None, False, {}, "", [], ""
-        # [XPATH]为需从详情页面解析磁力链
-        if url.startswith("["):
-            _xpath = url[1:-1]
-            url = page_url
-        # #XPATH#为需从详情页面解析磁力Hash
-        elif url.startswith("#"):
-            _xpath = url[1:-1]
-            _hash = True
-            url = page_url
-        if not url:
-            return None, "Url链接为空"
-        # 获取种子内容，磁力链不解析
-        if url.startswith("magnet:"):
-            content = url
-        # HTTP协议偿试下载种子内容
-        elif url.startswith("http"):
-            # 已经下载过了种子文件，直接读取
-            if torrent_file:
-                content, dl_files_folder, dl_files, retmsg = Torrent().read_torrent_content(torrent_file)
-            # 从详情页面XPATH解析下载链接
-            elif _xpath:
-                content = self.sites.parse_site_download_url(page_url=url,
-                                                             xpath=_xpath)
-                if not content:
-                    return None, "无法从详情页面：%s 解析出下载链接" % url
-                # 解析出磁力链，补充Trackers
-                if content.startswith("magnet:"):
-                    content = Torrent.add_trackers_to_magnet(url=content, title=title)
-                # 解析出来的是HASH值，转换为磁力链
-                elif _hash:
-                    content = Torrent.convert_hash_to_magnet(hash_text=content, title=title)
-                    if not content:
-                        return None, "%s 转换磁力链失败" % content
-            # 从HTTP链接下载种子
-            else:
-                # 获取Cookie和ua等
-                site_info = self.sites.get_site_attr(url)
-                # 下载种子文件，并读取信息
-                _, content, dl_files_folder, dl_files, retmsg = Torrent().get_torrent_info(
-                    url=url,
-                    cookie=site_info.get("cookie"),
-                    ua=site_info.get("ua"),
-                    referer=page_url if site_info.get("referer") else None
-                )
-            if retmsg:
-                log.warn("【Downloader】%s" % retmsg)
-            if not content:
-                return None, retmsg
+        # 有种子文件时解析种子信息
+        if torrent_file:
+            url = os.path.basename(torrent_file)
+            content, dl_files_folder, dl_files, retmsg = Torrent().read_torrent_content(torrent_file)
+        # 没有种子文件解析链接
         else:
-            content = url
+            url = media_info.enclosure
+            if not url:
+                return None, "下载链接为空"
+            # 获取种子内容，磁力链不解析
+            if url.startswith("magnet:"):
+                content = url
+            else:
+                # [XPATH]为需从详情页面解析磁力链
+                if url.startswith("["):
+                    _xpath = url[1:-1]
+                    url = page_url
+                # #XPATH#为需从详情页面解析磁力Hash
+                elif url.startswith("#"):
+                    _xpath = url[1:-1]
+                    _hash = True
+                    url = page_url
+                # 从详情页面XPATH解析下载链接
+                if _xpath:
+                    content = self.sites.parse_site_download_url(page_url=url,
+                                                                 xpath=_xpath)
+                    if not content:
+                        return None, "无法从详情页面：%s 解析出下载链接" % url
+                    # 解析出磁力链，补充Trackers
+                    if content.startswith("magnet:"):
+                        content = Torrent.add_trackers_to_magnet(url=content, title=title)
+                    # 解析出来的是HASH值，转换为磁力链
+                    elif _hash:
+                        content = Torrent.convert_hash_to_magnet(hash_text=content, title=title)
+                        if not content:
+                            return None, "%s 转换磁力链失败" % content
+                # 从HTTP链接下载种子
+                else:
+                    # 获取Cookie和ua等
+                    site_info = self.sites.get_site_attr(url)
+                    # 下载种子文件，并读取信息
+                    _, content, dl_files_folder, dl_files, retmsg = Torrent().get_torrent_info(
+                        url=url,
+                        cookie=site_info.get("cookie"),
+                        ua=site_info.get("ua"),
+                        referer=page_url if site_info.get("referer") else None
+                    )
+        # 解析完成
+        if retmsg:
+            log.warn("【Downloader】%s" % retmsg)
+        if not content:
+            return None, retmsg
 
         # 下载设置
         if download_setting:
-            download_attr = self.get_download_setting(download_setting)
-            if not download_attr:
-                download_attr = self.get_download_setting(self._default_download_setting)
+            download_attr = self.get_download_setting(download_setting) \
+                            or self.get_download_setting(self.get_default_download_setting())
         else:
-            download_attr = self.get_download_setting(self._default_download_setting)
+            download_attr = self.get_download_setting(self.get_default_download_setting())
         # 下载器类型
         dl_type = self.__get_client_type(download_attr.get("downloader")) or self._default_client_type
         # 下载器客户端
@@ -923,7 +919,7 @@ class Downloader:
         if not self._downloaddir:
             return []
         if not setting:
-            setting = self._default_download_setting
+            setting = self.get_default_download_setting()
         # 查询下载设置
         download_setting = self.get_download_setting(sid=setting)
         # 下载设置为QB
@@ -1044,4 +1040,7 @@ class Downloader:
         获取默认下载设置
         :return: 默认下载设置id
         """
-        return self._default_download_setting
+        default_download_setting = SystemConfig().get_system_config("DefaultDownloadSetting") or "-1"
+        if not self._download_setting.get(default_download_setting):
+            default_download_setting = "-1"
+        return default_download_setting
